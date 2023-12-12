@@ -1,86 +1,134 @@
-from PIL import Image
+from PIL import Image, ImageDraw
 
-def embed_watermark(image_path, watermark, output_path):
-    # Открываем изображение
-    image = Image.open(image_path)
-    
-    # Конвертируем изображение в режим RGB
-    image = image.convert("RGB")
-    
-    # Получаем размеры изображения
-    width, height = image.size
-    
-    # Преобразовываем водяной знак в бинарный формат
-    watermark_bin = ''.join(format(ord(char), '08b') for char in watermark)
-    
-    # Индексы для бит водяного знака
-    watermark_index = 0
-    
-    # Проходим по каждому пикселю изображения
-    for y in range(height):
-        for x in range(width):
-            # Получаем значения RGB пикселя
-            pixel = list(image.getpixel((x, y)))
-            
-            # Внедряем бит водяного знака в синий канал
-            if watermark_index < len(watermark_bin):
-                if watermark_bin[watermark_index] == '1':
-                    pixel[2] |= 1  # Устанавливаем младший бит в 1
-                else:
-                    pixel[2] &= ~1  # Обнуляем младший бит
-                watermark_index += 1
-            
-            # Обновляем пиксель в изображении
-            image.putpixel((x, y), tuple(pixel))
-    
-    # Сохраняем результат
-    image.save(output_path)
+class KutterJordanBossen:
+    NUM_OF_REPEATS = 15
 
-def extract_watermark(image_path, watermark_length):
-    # Открываем изображение
-    image = Image.open(image_path)
-    
-    # Конвертируем изображение в режим RGB
-    image = image.convert("RGB")
-    
-    # Получаем размеры изображения
-    width, height = image.size
-    
-    # Строка для хранения извлеченного водяного знака
-    extracted_watermark = ""
-    
-    # Проходим по каждому пикселю изображения
-    for y in range(height):
-        for x in range(width):
-            # Получаем значение синего канала пикселя
-            blue_channel = image.getpixel((x, y))[2]
-            
-            # Извлекаем младший бит из синего канала и добавляем в строку
-            extracted_watermark += str(blue_channel & 1)
-            
-            # Если достигнута длина водяного знака, завершаем извлечение
-            if len(extracted_watermark) == watermark_length:
-                return extracted_watermark
+    def __init__(self):
+        self.x_pos = self.y_pos = 3
 
-def binary_to_text(binary_str):
-    text = ""
-    for i in range(0, len(binary_str), 8):
-        byte = binary_str[i:i+8]
-        text += chr(int(byte, 2))
-    return text
+    def encode(self, text, bitmap):
+        message = self.prepare_text_to_encode(text)
+        result = bitmap.copy()
 
-# Пример использования
-image_path = "input_image.bmp"
-watermark_text = "Hello, Watermark!"
-output_path = "output_image_with_watermark.bmp"
+        if (len(message) * 8 * self.NUM_OF_REPEATS >
+                (bitmap.width // 4 - 1) * (bitmap.height // 4 - 1)):
+            raise Exception("Image is too small for the given text.")
 
-# Внедрение водяного знака
-embed_watermark(image_path, watermark_text, output_path)
+        for i in range(len(message)):
+            self.write_byte(result, message[i])
 
-# Извлечение водяного знака
-extracted_watermark = extract_watermark(output_path, len(watermark_text) * 8)
-print("Extracted Watermark:", extracted_watermark)
+        return result
 
-# Преобразование бинарной последовательности в текст
-decoded_text = binary_to_text(extracted_watermark)
-print("Decoded Text:", decoded_text)
+    def decode(self, bitmap):
+        self.x_pos = self.y_pos = 3
+
+        len_byte_0 = self.read_byte(bitmap)
+        len_byte_1 = self.read_byte(bitmap)
+        len_byte_2 = self.read_byte(bitmap)
+        len_byte_3 = self.read_byte(bitmap)
+
+        msg_len = ((len_byte_0 & 0xff) << 24) | ((len_byte_1 & 0xff) << 16) | \
+                  ((len_byte_2 & 0xff) << 8) | (len_byte_3 & 0xff)
+
+        if msg_len <= 0 or (msg_len * 8 * self.NUM_OF_REPEATS >
+                            (bitmap.width // 4 - 1) * (bitmap.height // 4 - 1)):
+            raise Exception("Error decoding. Make sure the image contains text.")
+
+        msg_bytes = [self.read_byte(bitmap) for _ in range(msg_len)]
+        msg = bytes(msg_bytes).decode('utf-8')
+        return msg
+
+    def prepare_text_to_encode(self, text):
+        msg_bytes = text.encode('utf-8')
+        len_bytes = len(msg_bytes).to_bytes(4, byteorder='big')
+
+        message = bytearray(len_bytes + msg_bytes)
+        message[len(len_bytes):] = msg_bytes
+
+        return message
+
+    def write_byte(self, img, byte_val):
+        for j in range(7, -1, -1):
+            bit_val = (byte_val >> j) & 1
+            self.write_bit(img, bit_val)
+
+    def read_byte(self, img):
+        byte_val = 0
+
+        for _ in range(8):
+            byte_val = (byte_val << 1) | (self.read_bit(img) & 1)
+
+        return byte_val
+
+    def write_bit(self, img, bit):
+        for _ in range(self.NUM_OF_REPEATS):
+            if self.x_pos + 4 > img.width:
+                self.x_pos = 3
+                self.y_pos += 4
+
+            self.write_into_pixel(img, self.x_pos, self.y_pos, bit, 0.25)
+            self.x_pos += 4
+
+    def read_bit(self, img):
+        bit_estimate = 0
+
+        for _ in range(self.NUM_OF_REPEATS):
+            if self.x_pos + 4 > img.width:
+                self.x_pos = 3
+                self.y_pos += 4
+
+            bit_estimate += self.read_from_pixel(img, self.x_pos, self.y_pos)
+            self.x_pos += 4
+
+        bit_estimate /= self.NUM_OF_REPEATS
+
+        return 1 if bit_estimate > 0.5 else 0
+
+    @staticmethod
+    def write_into_pixel(image, x, y, bit, energy):
+        red, green, blue = image.getpixel((x, y))
+
+        pixel_brightness = int(0.29890 * red + 0.58662 * green + 0.11448 * blue)
+
+        modified_blue_component = int(blue + energy * pixel_brightness) if bit > 0 \
+            else int(blue - energy * pixel_brightness)
+
+        modified_blue_component = max(0, min(255, modified_blue_component))
+
+        pixel_modified = (red, green, modified_blue_component)
+        image.putpixel((x, y), pixel_modified)
+
+        return modified_blue_component
+
+    def read_from_pixel(self, image, x, y):
+        estimate = 0
+
+        for i1 in range(1, 4):
+            pixel = image.getpixel((x + i1, y))
+            estimate += pixel[2]
+
+        for i1 in range(1, 4):
+            pixel = image.getpixel((x - i1, y))
+            estimate += pixel[2]
+
+        for i1 in range(1, 4):
+            pixel = image.getpixel((x, y + i1))
+            estimate += pixel[2]
+
+        for i1 in range(1, 4):
+            pixel = image.getpixel((x, y - i1))
+            estimate += pixel[2]
+
+        estimate //= 12
+
+        pixel = image.getpixel((x, y))
+        blue = pixel[2]
+
+        return 1 if blue > estimate else 0
+
+# Пример использования:
+kjb = KutterJordanBossen()
+image = Image.open("makima.png")
+encoded_image = kjb.encode("Hello, world!", image)
+decoded_text = kjb.decode(encoded_image)
+print(decoded_text)
